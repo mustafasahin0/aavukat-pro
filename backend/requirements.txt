@@ -1,0 +1,11 @@
+Django>=4.2,<5
+
+djangorestframework
+
+psycopg2-binary
+ 
+python-jose[cryptography]
+requests
+django-cors-headers
+python-dotenv 
+boto3 
