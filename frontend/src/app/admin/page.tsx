@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import withRole from '../../components/withRole';
 import { apiFetch } from '../../lib/api';
+import Link from 'next/link';
 
 // Use the UserProfile interface from UserProfileContext if it's shareable
 // For now, defining a similar one here for clarity based on what UserProfileSerializer provides.
@@ -195,7 +196,15 @@ function AdminDashboard() {
 
   return (
     <div className="p-6">
-      <h1 className="text-2xl font-semibold mb-4">Admin Dashboard - User Management</h1>
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl font-semibold">Admin Dashboard - User Management</h1>
+        <Link 
+          href="/admin/scheduled-tasks"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded text-sm"
+        >
+          Manage Scheduled Tasks
+        </Link>
+      </div>
       {ActionErrorMessage}
       {loading && userProfiles.length > 0 && <div className="p-2 text-blue-500">Refreshing user data...</div>}      
       {/* Lawyers Section */}

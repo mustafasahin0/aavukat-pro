@@ -12,9 +12,13 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os  # add at top
+from dotenv import load_dotenv # Import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env file (assuming it\'s in the backend directory with manage.py)
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 
 # Quick-start development settings - unsuitable for production
@@ -25,6 +29,11 @@ SECRET_KEY = 'django-insecure-(s9a@2(-#5q=e%u!9ja&q!--&b(e$@-%g@1zhyad8wp5%9ymml
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
+
+# Stripe Secret Key
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
+if DEBUG and not STRIPE_SECRET_KEY:
+    print("WARNING: STRIPE_SECRET_KEY not found in environment variables. Stripe integration will fail.")
 
 ALLOWED_HOSTS = ['*']
 
@@ -42,6 +51,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'appointments',
     'users',
+    'django_celery_beat',
 ]
 
 MIDDLEWARE = [
@@ -158,3 +168,23 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
 }
+
+# Celery Configuration Options
+# ------------------------------------------------------------------------------
+# Using Redis as the broker. Ensure Redis server is running.
+# If Redis requires a password or is on a different host/port, update the URL:
+# CELERY_BROKER_URL = 'redis://:password@hostname:port/0'
+# Use 'redis' as the hostname within Docker Compose network
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
+
+# Using the database to store task results (optional, choose one or none)
+# CELERY_RESULT_BACKEND = 'django-db' # Requires installing django-celery-results
+CELERY_RESULT_BACKEND = CELERY_BROKER_URL # Use Redis as result backend
+# CELERY_RESULT_BACKEND = None # Set to None if you don't need to store results
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE # Use Django's timezone
+
+# django-celery-beat configuration
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'

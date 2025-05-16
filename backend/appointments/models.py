@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.utils import timezone
 # Import the new profile models from the 'users' app
 from users.models import UserProfile, LawyerProfile as NewLawyerProfile
 
@@ -53,15 +54,45 @@ class Appointment(models.Model):
     start = models.DateTimeField()
     end = models.DateTimeField()
     STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('confirmed', 'Confirmed'),
-        ('cancelled', 'Cancelled'),
+        ('pending', 'Pending'),          # Client paid, awaiting lawyer confirmation
+        ('confirmed', 'Confirmed'),      # Lawyer confirmed
+        ('cancelled', 'Cancelled'),      # Cancelled by client or lawyer
+        # Potentially add: ('payment_failed', 'Payment Failed') if needed
     ]
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='pending') # Increased max_length
     created_at = models.DateTimeField(auto_now_add=True)
+    # Stripe Payment Info
+    stripe_payment_intent_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="Stripe PaymentIntent ID")
+    payment_status = models.CharField(max_length=50, blank=True, null=True, help_text="Latest known payment status from Stripe")
 
     def __str__(self):
         # Access usernames through their respective profile linkages
         client_username = self.client.user.username
         lawyer_username = self.lawyer.user_profile.user.username
         return f"{client_username} with {lawyer_username} at {self.start}"
+
+class SlotReservation(models.Model):
+    """ Represents a temporary hold on a time slot while a user attempts payment. """
+    lawyer = models.ForeignKey(NewLawyerProfile, on_delete=models.CASCADE, related_name='slot_reservations')
+    client_profile = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='slot_reservations') # Track who made the reservation
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField()
+    reserved_until = models.DateTimeField(db_index=True, help_text="Timestamp when this reservation expires.")
+    stripe_payment_intent_id = models.CharField(max_length=255, unique=True, help_text="Links reservation to a Stripe PaymentIntent.")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Prevent multiple active reservations for the same exact slot
+        # Note: This relies on exact start/end times. Overlapping times need checks in the view.
+        unique_together = ('lawyer', 'start_time', 'end_time') 
+        ordering = ['reserved_until']
+
+    def is_active(self):
+        """ Checks if the reservation is still active (not expired). """
+        return timezone.now() < self.reserved_until
+
+    def __str__(self):
+        active_status = "Active" if self.is_active() else "Expired"
+        client_username = self.client_profile.user.username
+        lawyer_username = self.lawyer.user_profile.user.username
+        return f"Reservation for {client_username} with {lawyer_username} [{self.start_time} - {self.end_time}] until {self.reserved_until} ({active_status}) - PI: {self.stripe_payment_intent_id}"

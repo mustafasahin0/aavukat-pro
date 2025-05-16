@@ -1,9 +1,22 @@
-// Use client component for interactivity
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
-// import { useAuth } from '../../hooks/useAuth';
-import { apiFetch } from '../../lib/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { CardElement, useStripe, Elements } from '@stripe/react-stripe-js';
+import { loadStripe } from '@stripe/stripe-js';
+import { apiFetch } from '../../lib/api'; // Adjust path as needed
+import { useRouter, useSearchParams } from 'next/navigation';
+
+// Define a type for potential API errors
+interface ApiError extends Error {
+  response?: {
+    data?: {
+      detail?: string;
+      error?: string; // Added for handling stripe errors returned from backend
+      [key: string]: unknown; // Allow other properties in data
+    };
+    [key: string]: unknown; // Allow other properties in response
+  };
+}
 
 interface Lawyer {
   id: number;
@@ -15,203 +28,271 @@ interface Lawyer {
   };
 }
 
-interface Slot {
+interface TimeSlot {
   start: string;
   end: string;
 }
 
-interface GroupedSlots {
-  [dateKey: string]: Slot[];
-}
+// Load Stripe outside of component render to avoid recreating on every render
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || '');
 
-// Define a type for potential API errors
-interface ApiError extends Error {
-  response?: {
-    data?: {
-      detail?: string;
-      [key: string]: unknown; // Allow other properties in data
-    };
-    [key: string]: unknown; // Allow other properties in response
-  };
-}
+function ClientBookingPage() {
+    const stripe = useStripe();
+    const router = useRouter();
+    const searchParams = useSearchParams();
 
-export default function ClientBooking() {
-  // const { user } = useAuth();
-  const [lawyers, setLawyers] = useState<Lawyer[]>([]);
-  const [selectedLawyer, setSelectedLawyer] = useState<number | ''>('');
-  const [slots, setSlots] = useState<Slot[]>([]);
-  const [bookingMessage, setBookingMessage] = useState('');
-  const [isLoadingLawyers, setIsLoadingLawyers] = useState(true);
-  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
+    // State variables
+    const [lawyers, setLawyers] = useState<Lawyer[]>([]);
+    const [selectedLawyer, setSelectedLawyer] = useState<Lawyer | null>(null);
+    const [selectedDate, setSelectedDate] = useState<string>('');
+    const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>('');
+    const [availableSlots, setAvailableSlots] = useState<TimeSlot[]>([]);
+    const [error, setError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isLoadingLawyers, setIsLoadingLawyers] = useState(true);
+    const [clientSecret, setClientSecret] = useState<string | null>(null);
+    const [paymentStatus, setPaymentStatus] = useState<string | null>(null);
+    const [confirmationStatus, setConfirmationStatus] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadLawyers() {
-      setIsLoadingLawyers(true);
-      try {
-        const data = await apiFetch('/client/lawyers/');
-        setLawyers(data as Lawyer[]);
-      } catch (e) {
-        console.error('Failed to load lawyers', e);
-        setBookingMessage('Error: Could not load lawyers.');
-      } finally {
-        setIsLoadingLawyers(false);
-      }
-    }
-    loadLawyers();
-  }, []);
+    // Fetch lawyers
+    useEffect(() => {
+        const fetchLawyers = async () => {
+            setIsLoadingLawyers(true);
+            setError(null);
+            try {
+                const data = await apiFetch('/client/lawyers/');
+                setLawyers(data as Lawyer[]);
+            } catch (e) {
+                console.error("Failed to fetch lawyers:", e);
+                setError("Could not load lawyers list.");
+                setLawyers([]);
+            } finally {
+                 setIsLoadingLawyers(false);
+            }
+        };
+        fetchLawyers();
+    }, []);
 
-  const onLawyerChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const id = e.target.value ? parseInt(e.target.value) : '';
-    setSelectedLawyer(id);
-    setSlots([]);
-    setBookingMessage('');
-    if (id) {
-      setIsLoadingSlots(true);
-      try {
-        const data = await apiFetch(`/appointments/available_slots?lawyer_id=${id}`);
-        // Ensure slots are sorted by start time before grouping
-        const sortedSlots = (data as Slot[]).sort((a,b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-        setSlots(sortedSlots);
-      } catch (e) {
-        console.error('Failed to load slots', e);
-        setBookingMessage('Error: Could not load available slots.');
-      } finally {
-        setIsLoadingSlots(false);
-      }
-    }
-  };
-
-  const bookSlot = async (slot: Slot) => {
-    if (!selectedLawyer) return;
-    setBookingMessage('Processing your booking...'); // Optimistic booking message
-    try {
-      await apiFetch('/appointments/', {
-        method: 'POST',
-        body: JSON.stringify({
-          lawyer: selectedLawyer,
-          start: slot.start,
-          end: slot.end,
-        }),
-      });
-      setBookingMessage(`Successfully Booked: ${new Date(slot.start).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} to ${new Date(slot.end).toLocaleTimeString([], { timeStyle: 'short' })}`);
-      // Refresh slots for the current lawyer to remove the booked one
-      if (selectedLawyer) {
-        setIsLoadingSlots(true);
+    // Fetch available slots when lawyer and date are selected
+    const fetchAvailableSlots = useCallback(async (lawyerId: number, date: string) => {
+        if (!lawyerId || !date) {
+            setAvailableSlots([]);
+            return;
+        }
+        setError(null);
         try {
-          const data = await apiFetch(`/appointments/available_slots?lawyer_id=${selectedLawyer}`);
-          const sortedSlots = (data as Slot[]).sort((a,b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-          setSlots(sortedSlots);
+            const data = await apiFetch(`/appointments/available-slots/?lawyer_id=${lawyerId}&date=${date}`);
+            setAvailableSlots(data as TimeSlot[]);
         } catch (e) {
-          console.error('Failed to reload slots after booking', e);
-          // Keep existing slots, but maybe show a subtle error or log it
-        } finally {
-          setIsLoadingSlots(false);
+            console.error("Failed to fetch slots:", e);
+            setError("Could not load available time slots.");
+            setAvailableSlots([]);
         }
-      }
-    } catch (e: unknown) {
-      console.error('Booking failed', e);
-      let errorMsg = 'Booking failed. The slot may have been taken or an unknown error occurred.';
-      if (typeof e === 'object' && e !== null && 'response' in e) {
-        const apiErr = e as ApiError; // Type assertion
-        if (apiErr.response?.data?.detail) {
-          errorMsg = apiErr.response.data.detail;
+    }, []);
+
+    useEffect(() => {
+        if (selectedLawyer?.id && selectedDate) {
+            fetchAvailableSlots(selectedLawyer.id, selectedDate);
         }
-      }
-      setBookingMessage(`Error: ${errorMsg}`);
-    }
-  };
+    }, [selectedLawyer, selectedDate, fetchAvailableSlots]);
+    
 
-  const groupedSlots = useMemo(() => {
-    return slots.reduce((acc, slot) => {
-      const dateKey = new Date(slot.start).toLocaleDateString([], {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      });
-      if (!acc[dateKey]) {
-        acc[dateKey] = [];
-      }
-      acc[dateKey].push(slot);
-      return acc;
-    }, {} as GroupedSlots);
-  }, [slots]);
+    // Effect to handle Stripe payment confirmation redirect
+    useEffect(() => {
+        if (!stripe) {
+            return;
+        }
 
-  return (
-    <div className="p-6 bg-gray-50 min-h-screen">
-      <h1 className="text-3xl font-bold mb-8 text-gray-800">Book an Appointment</h1>
-      
-      {/* Select Lawyer Section */}
-      <section className="mb-8 p-6 bg-white rounded-lg shadow-lg">
-        <label htmlFor="lawyerSelect" className="block mb-2 text-xl font-semibold text-gray-700">Select Lawyer</label>
-        {isLoadingLawyers ? (
-          <p className="text-gray-600">Loading lawyers...</p>
-        ) : lawyers.length === 0 ? (
-          <p className="text-gray-600">No lawyers available at the moment.</p>
-        ) : (
-          <select
-            id="lawyerSelect"
-            value={selectedLawyer}
-            onChange={onLawyerChange}
-            className="border p-3 rounded-md w-full shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-gray-900 text-lg"
-          >
-            <option value="">-- Choose a Lawyer --</option>
-            {lawyers.map(l => (
-              <option key={l.id} value={l.id}>
-                {l.user.first_name || l.user.username} {l.user.last_name}
-              </option>
-            ))}
-          </select>
-        )}
-      </section>
+        const clientSecretParam = searchParams.get('payment_intent_client_secret');
+        const paymentIntentIdParam = searchParams.get('payment_intent');
+        const redirectStatus = searchParams.get('redirect_status');
 
-      {/* Available Slots Section */}
-      {selectedLawyer && (
-        <section className="p-6 bg-white rounded-lg shadow-lg">
-          <h2 className="text-2xl font-semibold mb-6 text-gray-700">Available Slots</h2>
-          {isLoadingSlots ? (
-            <p className="text-gray-600">Loading available slots...</p>
-          ) : Object.keys(groupedSlots).length === 0 ? (
-            <p className="text-gray-600">No available slots for this lawyer in the upcoming week. Please try another lawyer or check back later.</p>
-          ) : (
-            <div className="space-y-6">
-              {Object.entries(groupedSlots).map(([dateKey, daySlots]) => (
-                <div key={dateKey} className="p-4 border border-gray-200 rounded-lg bg-gray-50 shadow-sm">
-                  <h3 className="text-xl font-medium mb-4 text-indigo-600">{dateKey}</h3>
-                  <ul className="space-y-3">
-                    {daySlots.map((s, i) => (
-                      <li key={i} className="flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 bg-white rounded-md border border-gray-100 shadow-xs">
-                        <div className="mb-2 sm:mb-0">
-                          <span className="text-gray-700 font-medium">
-                            {new Date(s.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })} - {new Date(s.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => bookSlot(s)}
-                          className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md text-sm transition-colors duration-150 shadow-md"
-                        >
-                          Book This Slot
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+        if (clientSecretParam && paymentIntentIdParam && redirectStatus) {
+            router.replace('/client', undefined);
+            
+            setIsLoading(true);
+            setConfirmationStatus('Processing payment confirmation...');
+
+            if (redirectStatus === 'succeeded') {
+                setPaymentStatus('Payment successful! Confirming booking...');
+                apiFetch('/appointments/confirm_booking/', {
+                    method: 'POST',
+                    body: JSON.stringify({ payment_intent_id: paymentIntentIdParam }),
+                })
+                .then(response => {
+                    setConfirmationStatus(response.message || 'Booking confirmed successfully! Your appointment is pending lawyer approval.');
+                     setSelectedLawyer(null);
+                     setSelectedDate('');
+                     setSelectedTimeSlot('');
+                     setAvailableSlots([]);
+                     setClientSecret(null);
+                })
+                .catch(async (e: unknown) => {
+                    console.error("Booking confirmation failed:", e);
+                    let errorMsg = "Failed to confirm booking after successful payment. Please contact support.";
+                     if (typeof e === 'object' && e !== null && 'response' in e) {
+                        const apiErr = e as ApiError;
+                        errorMsg = apiErr.response?.data?.detail || apiErr.response?.data?.error || errorMsg;
+                         if (apiErr.response?.status === 409) {
+                             errorMsg = "Confirmation failed: The slot was taken just before confirmation. Your payment should be refunded automatically. Please try booking again.";
+                         } else {
+                         }
+                     }
+                     setConfirmationStatus(`Error: ${errorMsg}`);
+                })
+                .finally(() => {
+                    setIsLoading(false);
+                });
+
+            } else if (redirectStatus === 'processing') {
+                setPaymentStatus('Payment processing. We\'ll update you when payment is confirmed.');
+                setIsLoading(false);
+                 setConfirmationStatus(null); 
+            } else {
+                setPaymentStatus(`Payment failed: ${searchParams.get('message') || 'Please try again.'}`);
+                setIsLoading(false);
+                 setConfirmationStatus(null); 
+            }
+        }
+    }, [stripe, searchParams, router]);
+
+    // const formatAndGroupSlots = (slotsToGroup: TimeSlot[]) => {
+    //     return {}; 
+    // };
+    
+    // Placeholder for date selection logic
+    const availableDates = Array.from({ length: 7 }).map((_, i) => {
+        const date = new Date();
+        date.setDate(date.getDate() + i);
+        return date.toISOString().split('T')[0]; // YYYY-MM-DD format
+    });
+
+    return (
+        <div className="p-6">
+            <h1 className="text-2xl font-semibold mb-6">Book Appointment</h1>
+
+            {confirmationStatus && (
+                <div className={`p-4 mb-4 rounded ${confirmationStatus.startsWith('Error:') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                    {confirmationStatus}
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
+            )}
+            {paymentStatus && !confirmationStatus && (
+                 <div className={`p-4 mb-4 rounded ${paymentStatus.startsWith('Payment failed:') ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                     {paymentStatus}
+                 </div>
+            )}
+            {error && !confirmationStatus && <p className="text-red-500 mb-4">Error: {error}</p>}
 
-      {/* Booking Message Area */}
-      {bookingMessage && (
-        <div className={`mt-6 p-4 rounded-md shadow-md text-center font-medium 
-                        ${bookingMessage.startsWith('Error:') ? 'bg-red-100 text-red-700' : 
-                         bookingMessage.startsWith('Successfully Booked:') ? 'bg-green-100 text-green-700' : 
-                         'bg-blue-100 text-blue-700'}` // Default for processing message
-                      }>
-          {bookingMessage}
+            {/* Lawyer and Date Selection */} 
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                {/* Lawyer Selection Dropdown */} 
+                <div>
+                    <label htmlFor="lawyer-select" className="block text-sm font-medium text-gray-700 mb-1">
+                        Select Lawyer
+                    </label>
+                    <select 
+                        id="lawyer-select"
+                        value={selectedLawyer?.id || ''}
+                        onChange={(e) => {
+                            const lawyer = lawyers.find(l => l.id === parseInt(e.target.value));
+                            setSelectedLawyer(lawyer || null);
+                            setSelectedTimeSlot('');
+                            setAvailableSlots([]);
+                        }}
+                        disabled={isLoadingLawyers}
+                        className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                    >
+                        <option value="" disabled>-- Select a Lawyer --</option>
+                        {isLoadingLawyers ? (
+                            <option disabled>Loading lawyers...</option>
+                        ) : lawyers.length > 0 ? (
+                            lawyers.map(lawyer => (
+                                <option key={lawyer.id} value={lawyer.id}>
+                                    {lawyer.user.first_name} {lawyer.user.last_name} ({lawyer.user.username})
+                                </option>
+                            ))
+                        ) : (
+                            <option disabled>No lawyers available</option>
+                        )}
+                    </select>
+                </div>
+
+                {/* Date Selection Dropdown */} 
+                <div>
+                     <label htmlFor="date-select" className="block text-sm font-medium text-gray-700 mb-1">
+                        Select Date
+                    </label>
+                    <select
+                        id="date-select"
+                        value={selectedDate}
+                        onChange={(e) => {
+                            setSelectedDate(e.target.value);
+                            setSelectedTimeSlot('');
+                             setAvailableSlots([]);
+                        }}
+                        disabled={!selectedLawyer}
+                         className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                    >
+                        <option value="" disabled>-- Select a Date --</option>
+                        {availableDates.map(date => (
+                            <option key={date} value={date}>
+                                {new Date(date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+
+            {/* Time Slot Selection */} 
+            <div className="mb-6">
+                 <h3 className="text-lg font-medium mb-2">Available Slots for {selectedDate || 'select date'}</h3>
+                 {availableSlots.length > 0 ? (
+                     <div className="flex flex-wrap gap-2">
+                         {availableSlots.map(slot => (
+                             <button 
+                                 key={slot.start}
+                                 onClick={() => setSelectedTimeSlot(slot.start)} 
+                                 className={`px-4 py-2 rounded border ${selectedTimeSlot === slot.start ? 'bg-blue-500 text-white border-blue-700' : 'bg-white hover:bg-gray-100 border-gray-300'}`}
+                             >
+                                 {new Date(slot.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - {new Date(slot.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                             </button>
+                         ))}
+                     </div>
+                 ) : (
+                      <p className="text-gray-500">{selectedLawyer && selectedDate ? 'No slots available for this date.' : 'Please select a lawyer and date.'}</p>
+                 )}
+            </div>
+
+            {selectedTimeSlot && (
+                <div className="mt-6 border-t pt-6">
+                    <h2 className="text-xl font-semibold mb-4">Confirm and Pay</h2>
+                    <p>Lawyer: {selectedLawyer?.user.first_name || 'N/A'}</p>
+                    <p>Date: {selectedDate}</p>
+                    <p>Time: {new Date(selectedTimeSlot).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                    <p className="font-bold mt-2">Price: $50.00</p> 
+
+                    <div className="my-4 p-3 border rounded border-gray-300">
+                        <CardElement options={{ hidePostalCode: true }} />
+                    </div>
+
+                    <button
+                        disabled={isLoading || !stripe || !selectedLawyer || !selectedDate || !selectedTimeSlot}
+                        className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded disabled:opacity-50"
+                    >
+                        {isLoading ? 'Processing...' : 'Pay and Book Appointment'}
+                    </button>
+                     {/* Display clientSecret for debugging if needed */} 
+                     {clientSecret && <p className="text-xs text-gray-500 mt-2">Client Secret Ready</p>} 
+                </div>
+            )}
         </div>
-      )}
-    </div>
-  );
-} 
+    );
+}
+
+export default function ClientPageWrapper() {
+    return (
+        <Elements stripe={stripePromise}>
+            <ClientBookingPage />
+        </Elements>
+    );
+}
